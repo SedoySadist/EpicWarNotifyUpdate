@@ -1,11 +1,5 @@
 {
-  "version": "1.5",
-  "versionCode": 6,
-  "apk": "https://github.com/SedoySadist/EpicWarNotifyUpdate/releases/download/v1.5/app-debug.apk",
-  "changes": [
-    "Первая версия EpicWar Notify",
-    "Стражи гнёзд",
-    "Боевые события",
-    "Личные таймеры"
-  ]
+  "version": "1.6",
+  "versionCode": 7,
+  "apk": "https://github.com/SedoySadist/EpicWarNotifyUpdate/releases/download/v1.6/app-debug.apk"
 }
