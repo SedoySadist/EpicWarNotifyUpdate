@@ -1,0 +1,2 @@
+# EpicWarNotifyUpdate
+EpicWar Notify Updates
