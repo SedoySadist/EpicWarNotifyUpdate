@@ -1,6 +1,6 @@
 {
-  "version": "1.4",
-  "versionCode": 5,
+  "version": "1.5",
+  "versionCode": 6,
   "apk": "https://github.com/SedoySadist/EpicWarNotifyUpdate/releases/download/v1.4/app-debug.apk",
   "changes": [
     "Первая версия EpicWar Notify",
