@@ -24,6 +24,9 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
+      - name: Validate PC server
+        run: python -m py_compile mumu-remote-control/pc-server/remote_server.py mumu-remote-control/pc-server/install_into_mumubot.py
+
       - name: Build debug APK
         working-directory: mumu-remote-control
         run: gradle :app:assembleDebug --stacktrace
