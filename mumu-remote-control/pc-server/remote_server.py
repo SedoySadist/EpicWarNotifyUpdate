@@ -85,6 +85,37 @@ def _find_mumu_manager():
         except Exception:
             pass
 
+    # PATH, если MuMu добавил свои утилиты в окружение.
+    try:
+        cp = subprocess.run(
+            ["where", "MuMuManager.exe"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if cp.returncode == 0:
+            for line in cp.stdout.decode("utf-8", "ignore").splitlines():
+                item = Path(line.strip())
+                if item.exists():
+                    return str(item)
+    except Exception:
+        pass
+
+    # Пользователь мог поставить MuMu на D:, E: и т.д.
+    for drive in "CDEFGH":
+        for rel in ("Program Files/Netease", "Program Files (x86)/Netease", "Netease"):
+            root = Path(f"{drive}:/{rel}")
+            try:
+                if not root.exists():
+                    continue
+                for item in root.glob("MuMu*/nx_main/MuMuManager.exe"):
+                    if item.exists():
+                        return str(item)
+            except Exception:
+                continue
+
     for item in candidates:
         try:
             if item.exists():
