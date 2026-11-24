@@ -320,7 +320,13 @@ def _account_records():
             serial = rec.get("serial") or ""
             if serial:
                 covered.add(serial)
-            display_name = names.get(serial) or rec.get("name") or f"Аккаунт {len(result) + 1}"
+            fallback_serial = f"127.0.0.1:{16384 + 32 * int(rec['vm_index'])}"
+            display_name = (
+                names.get(serial)
+                or names.get(fallback_serial)
+                or rec.get("name")
+                or f"Аккаунт {len(result) + 1}"
+            )
             result.append({
                 "id": rec["id"],
                 "device": serial,
