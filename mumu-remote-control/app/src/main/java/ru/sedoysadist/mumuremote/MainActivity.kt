@@ -34,7 +34,7 @@ class MainActivity : Activity() {
     private val bg = Color.rgb(11, 13, 16)
     private val panel = Color.rgb(24, 27, 33)
     private val panel2 = Color.rgb(32, 36, 44)
-    private val text = Color.rgb(242, 244, 248)
+    private val textColor = Color.rgb(242, 244, 248)
     private val muted = Color.rgb(160, 167, 179)
     private val accent = Color.rgb(124, 77, 255)
     private val ok = Color.rgb(67, 180, 107)
@@ -64,7 +64,7 @@ class MainActivity : Activity() {
         root.addView(TextView(this).apply {
             text = "MuMu Remote"
             textSize = 25f
-            setTextColor(text)
+            setTextColor(textColor)
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         })
         root.addView(TextView(this).apply {
@@ -83,7 +83,7 @@ class MainActivity : Activity() {
         serverInput = EditText(this).apply {
             hint = "http://192.168.1.10:8765"
             setHintTextColor(muted)
-            setTextColor(text)
+            setTextColor(textColor)
             setSingleLine(true)
             setText(prefs.getString("server_url", "") ?: "")
             setBackgroundColor(panel2)
@@ -95,7 +95,7 @@ class MainActivity : Activity() {
         pairInput = EditText(this).apply {
             hint = "Код сопряжения"
             setHintTextColor(muted)
-            setTextColor(text)
+            setTextColor(textColor)
             inputType = InputType.TYPE_CLASS_NUMBER
             setSingleLine(true)
             setBackgroundColor(panel2)
@@ -128,7 +128,7 @@ class MainActivity : Activity() {
         topRow.addView(TextView(this).apply {
             text = "Аккаунты"
             textSize = 20f
-            setTextColor(text)
+            setTextColor(textColor)
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
@@ -247,7 +247,7 @@ class MainActivity : Activity() {
         titleRow.addView(TextView(this).apply {
             text = name
             textSize = 18f
-            setTextColor(text)
+            setTextColor(textColor)
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         titleRow.addView(TextView(this).apply {
@@ -287,7 +287,7 @@ class MainActivity : Activity() {
             card.addView(TextView(this).apply {
                 text = resourceLine
                 textSize = 12f
-                setTextColor(text)
+                setTextColor(textColor)
                 setPadding(0, 0, 0, dp(8))
             })
         }
