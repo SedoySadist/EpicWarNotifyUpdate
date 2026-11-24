@@ -205,6 +205,27 @@ def _set_pause(device, minutes):
     return minutes
 
 
+def hold_account_for_phone_login(device, minutes=60):
+    """Stop the PC game and hold this account until the user resumes it from MuMu Remote."""
+    minutes = max(1, min(int(minutes), 1440))
+    _set_pause(device, minutes)
+    with _LOCK:
+        data = _pause_state()
+        entry = data["devices"].setdefault(device, {})
+        entry["reason"] = "phone_login"
+        entry["manual_resume_only"] = True
+        entry["paused_until"] = max(float(entry.get("paused_until") or 0), time.time() + minutes * 60)
+        try:
+            _force_stop_game(device)
+            entry["game_stopped"] = True
+            entry["stopped_at"] = time.time()
+        except Exception as exc:
+            entry["stop_error"] = str(exc)[:500]
+        _atomic_write_json(PAUSE_FILE, data)
+    print(f"[Remote] {device}: обнаружен вход с другого устройства; ПК остановлен до ручного возобновления.")
+    return minutes
+
+
 def _request_resume(device):
     with _LOCK:
         data = _pause_state()
@@ -246,7 +267,8 @@ def remote_pause_gate(device: str) -> bool:
         paused_until = float(entry.get("paused_until") or 0)
         resume_requested = bool(entry.get("resume_requested"))
 
-        if paused_until > now and not resume_requested:
+        manual_resume_only = bool(entry.get("manual_resume_only"))
+        if (paused_until > now and not resume_requested:
             if not entry.get("game_stopped"):
                 try:
                     _force_stop_game(device)
@@ -256,6 +278,9 @@ def remote_pause_gate(device: str) -> bool:
                     print(f"[Remote] {device}: игра остановлена до {datetime.fromtimestamp(paused_until).strftime('%H:%M:%S')}")
                 except Exception as exc:
                     print(f"[Remote] {device}: не удалось закрыть игру: {exc}")
+            return True
+
+        if manual_resume_only and not resume_requested:
             return True
 
         try:
@@ -306,13 +331,16 @@ def _account_payload(device, index, connected=None):
     paused_until = float(pause.get("paused_until") or 0) if isinstance(pause, dict) else 0
     remaining = max(0, int(paused_until - time.time()))
     names = _gui_name_map()
-    status = "paused" if remaining > 0 else ("online" if online else "offline")
+    manual_hold = bool(pause.get("manual_resume_only")) if isinstance(pause, dict) else False
+    status = "phone_hold" if manual_hold else ("paused" if remaining > 0 else ("online" if online else "offline"))
     return {
         "device": device,
         "name": names.get(device) or f"Аккаунт {index + 1}",
         "online": online,
         "status": status,
-        "paused": remaining > 0,
+        "paused": remaining > 0 or manual_hold,
+        "manual_resume_only": manual_hold,
+        "pause_reason": pause.get("reason") if isinstance(pause, dict) else "",
         "pause_remaining_seconds": remaining,
         "active_task": _active_task(device) if online else "",
         "foreground_app": runtime.get("foreground_app") if online and isinstance(runtime, dict) else None,
