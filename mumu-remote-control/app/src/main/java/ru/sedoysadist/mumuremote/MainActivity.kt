@@ -296,9 +296,11 @@ class MainActivity : Activity() {
     }
 
     private fun accountCard(a: JSONObject): View {
-        val device = a.optString("device")
-        val name = a.optString("name", device)
+        val device = a.optString("id", a.optString("device"))
+        val adbSerial = a.optString("device")
+        val name = a.optString("name", if (adbSerial.isBlank()) device else adbSerial)
         val online = a.optBoolean("online", true)
+        val mumuRunning = a.optBoolean("mumu_running", online)
         val paused = a.optBoolean("paused", false)
         val manualHold = a.optBoolean("manual_resume_only", false)
         val pauseRemaining = a.optInt("pause_remaining_seconds", 0)
@@ -335,8 +337,9 @@ class MainActivity : Activity() {
 
         card.addView(TextView(this).apply {
             text = buildString {
-                append(device)
-                if (!online) append("\nMuMu сейчас выключен или ADB не подключён")
+                if (adbSerial.isNotBlank()) append(adbSerial) else append("MuMu ID: ").append(device)
+                if (!online && mumuRunning) append("\nMuMu запущен, ADB ещё не готов")
+                if (!mumuRunning) append("\nMuMu сейчас выключен")
                 append("\nПриложение: ")
                 append(if (foreground.isBlank()) "-" else foreground)
                 if (activeTask.isNotBlank()) {
@@ -376,8 +379,12 @@ class MainActivity : Activity() {
         card.addView(row1)
 
         val row2 = buttonRow()
-        row2.addView(actionButton("Запустить игру", online) { postAction(device, "game/start", JSONObject()) }, weight())
-        row2.addView(actionButton("Закрыть игру", online) { postAction(device, "game/stop", JSONObject()) }, weight())
+        row2.addView(actionButton(if (mumuRunning) "Выключить MuMu" else "Запустить MuMu", device.startsWith("mumu:")) {
+            postAction(device, if (mumuRunning) "emulator/stop" else "emulator/start", JSONObject())
+        }, weight())
+        row2.addView(actionButton(if (online) "Закрыть игру" else "Запустить игру", online) {
+            postAction(device, if (online) "game/stop" else "game/start", JSONObject())
+        }, weight())
         row2.addView(actionButton("История", true) { showHistory(device, name) }, weight())
         card.addView(row2, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
 
