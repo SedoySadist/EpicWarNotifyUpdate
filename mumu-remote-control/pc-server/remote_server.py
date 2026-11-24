@@ -17,9 +17,10 @@ from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
 GAME_PACKAGE = "com.xxzhz.tlad.ru"
-SETTINGS_FILE = APP_DIR / "remote_server_settings.json"
-PAIR_FILE = APP_DIR / "REMOTE_PAIRING.txt"
-PAUSE_FILE = APP_DIR / "remote_pause_state.json"
+REMOTE_DIR = Path(os.getenv("APPDATA") or APP_DIR) / "MuMuBot" / "Remote"
+REMOTE_DIR.mkdir(parents=True, exist_ok=True)
+SETTINGS_FILE = REMOTE_DIR / "settings.json"
+PAUSE_FILE = REMOTE_DIR / "pause_state.json"
 BOT_RUNTIME_FILE = APP_DIR / "bot_runtime.json"
 BOT_STATE_FILE = APP_DIR / "bot_state.json"
 GUI_SETTINGS_FILE = APP_DIR / "gui_settings.json"
@@ -101,18 +102,61 @@ def _adb(*args, timeout=12, binary=False):
     return cp.stdout if binary else cp.stdout.decode("utf-8", "ignore")
 
 
-def _devices():
+def _looks_like_device(value):
+    value = str(value or "").strip()
+    if not value:
+        return False
+    if value.startswith("127.0.0.1:") and value.rsplit(":", 1)[-1].isdigit():
+        return True
+    if value.startswith("emulator-") and value[9:].isdigit():
+        return True
+    return False
+
+
+def _extract_devices(value, out):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if _looks_like_device(key):
+                out.add(str(key))
+            _extract_devices(item, out)
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            _extract_devices(item, out)
+    elif _looks_like_device(value):
+        out.add(str(value))
+
+
+def _connected_devices():
+    result = set()
     runtime = _read_json(BOT_RUNTIME_FILE, {})
-    runtime_devices = runtime.get("active_devices") if isinstance(runtime, dict) else None
-    if isinstance(runtime_devices, list) and runtime_devices:
-        return [str(x) for x in runtime_devices]
-    out = _adb("devices")
-    result = []
-    for line in out.splitlines()[1:]:
-        parts = line.split()
-        if len(parts) >= 2 and parts[1] == "device":
-            result.append(parts[0])
+    if isinstance(runtime, dict):
+        active = runtime.get("active_devices")
+        if isinstance(active, list):
+            result.update(str(x) for x in active if _looks_like_device(x))
+    try:
+        out = _adb("devices")
+        for line in out.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "device" and _looks_like_device(parts[0]):
+                result.add(parts[0])
+    except Exception:
+        pass
     return result
+
+
+def _known_devices():
+    found = set()
+    for path in (GUI_SETTINGS_FILE, BOT_STATE_FILE, BOT_RUNTIME_FILE, PAUSE_FILE):
+        _extract_devices(_read_json(path, {}), found)
+    found.update(_gui_name_map().keys())
+    found.update(_connected_devices())
+
+    def sort_key(device):
+        try:
+            return (0, int(str(device).rsplit(":", 1)[-1]))
+        except Exception:
+            return (1, str(device))
+    return sorted((d for d in found if _looks_like_device(d)), key=sort_key)
 
 
 def _gui_name_map():
@@ -253,19 +297,24 @@ def _active_task(device):
     return best
 
 
-def _account_payload(device, index):
+def _account_payload(device, index, connected=None):
+    connected = connected if isinstance(connected, set) else _connected_devices()
+    online = device in connected
     runtime = _runtime_device(device)
     pause = _entry(device)
     paused_until = float(pause.get("paused_until") or 0) if isinstance(pause, dict) else 0
     remaining = max(0, int(paused_until - time.time()))
     names = _gui_name_map()
+    status = "paused" if remaining > 0 else ("online" if online else "offline")
     return {
         "device": device,
         "name": names.get(device) or f"Аккаунт {index + 1}",
+        "online": online,
+        "status": status,
         "paused": remaining > 0,
         "pause_remaining_seconds": remaining,
-        "active_task": _active_task(device),
-        "foreground_app": runtime.get("foreground_app") if isinstance(runtime, dict) else None,
+        "active_task": _active_task(device) if online else "",
+        "foreground_app": runtime.get("foreground_app") if online and isinstance(runtime, dict) else None,
         "resources": {
             "battle_power_text": runtime.get("battle_power_text"),
             "gold_text": runtime.get("gold_text"),
@@ -309,6 +358,25 @@ def _history(device, limit=30):
     return rows[: max(1, min(int(limit), 100))]
 
 
+def _tailscale_ipv4():
+    candidates = [
+        "tailscale",
+        r"C:\\Program Files\\Tailscale\\tailscale.exe",
+        r"C:\\Program Files (x86)\\Tailscale\\tailscale.exe",
+    ]
+    for exe in candidates:
+        try:
+            cp = subprocess.run([exe, "ip", "-4"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=4, check=False)
+            if cp.returncode == 0:
+                for line in cp.stdout.decode("utf-8", "ignore").splitlines():
+                    ip = line.strip()
+                    if ip.startswith("100."):
+                        return ip
+        except Exception:
+            continue
+    return ""
+
+
 def _local_ips():
     result = []
     try:
@@ -323,7 +391,7 @@ def _local_ips():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "MuMuRemote/0.1"
+    server_version = "MuMuRemote/0.2"
 
     def log_message(self, format, *args):
         return
@@ -368,15 +436,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed, parts = self._route()
         if parsed.path == "/api/v1/ping":
-            self._json({"ok": True, "name": "MuMu Remote PC", "version": "0.1.0"})
+            self._json({"ok": True, "name": "MuMu Remote PC", "version": "0.2.0"})
             return
 
         if not self._require_auth():
             return
 
         if parsed.path == "/api/v1/accounts":
-            devs = _devices()
-            self._json({"accounts": [_account_payload(d, i) for i, d in enumerate(devs)], "updated_at": time.time()})
+            connected = _connected_devices()
+            devs = _known_devices()
+            self._json({"accounts": [_account_payload(d, i, connected) for i, d in enumerate(devs)], "updated_at": time.time()})
             return
 
         if len(parts) >= 5 and parts[:3] == ["api", "v1", "accounts"]:
@@ -411,7 +480,15 @@ class Handler(BaseHTTPRequestHandler):
             if not _PAIR_CODE or code != _PAIR_CODE:
                 self._json({"error": "Неверный код сопряжения"}, 403)
                 return
-            self._json({"ok": True, "token": _settings()["token"]})
+            port = int(_settings().get("port", 8765))
+            local_urls = [f"http://{ip}:{port}" for ip in _local_ips()]
+            tailscale_ip = _tailscale_ipv4()
+            self._json({
+                "ok": True,
+                "token": _settings()["token"],
+                "local_urls": local_urls,
+                "tailscale_url": f"http://{tailscale_ip}:{port}" if tailscale_ip else "",
+            })
             return
 
         if not self._require_auth():
@@ -457,21 +534,13 @@ def start_remote_server():
         _SERVER_THREAD.start()
 
         ips = _local_ips()
-        lines = [
-            "MuMu Remote",
-            f"Код сопряжения: {_PAIR_CODE}",
-            f"Порт: {cfg.get('port', 8765)}",
-            "",
-            "Адреса в локальной сети:",
-            *[f"http://{ip}:{cfg.get('port', 8765)}" for ip in ips],
-            "",
-            "Код меняется после каждого перезапуска сервера.",
-        ]
-        PAIR_FILE.write_text("\n".join(lines), encoding="utf-8")
+        tailscale_ip = _tailscale_ipv4()
         print("[Remote] Сервер запущен.")
         print(f"[Remote] Код сопряжения: {_PAIR_CODE}")
         for ip in ips:
             print(f"[Remote] http://{ip}:{cfg.get('port', 8765)}")
+        if tailscale_ip:
+            print(f"[Remote] Tailscale: http://{tailscale_ip}:{cfg.get('port', 8765)}")
 
 
 if __name__ == "__main__":
