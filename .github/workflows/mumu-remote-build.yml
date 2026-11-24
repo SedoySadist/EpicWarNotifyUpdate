@@ -37,3 +37,34 @@ jobs:
           name: MuMuRemote-debug
           path: mumu-remote-control/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+
+  build-upgrader:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate updater and remote server
+        shell: pwsh
+        run: |
+          python -m py_compile mumu-remote-control/tools/v11_upgrader.py
+          python -m py_compile mumu-remote-control/pc-server/remote_server.py
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pyinstaller
+
+      - name: Build one-click v11 upgrader
+        shell: pwsh
+        run: |
+          pyinstaller --onefile --noconsole --name MuMuBot_v11_Upgrade --add-data "mumu-remote-control/pc-server/remote_server.py;." mumu-remote-control/tools/v11_upgrader.py
+
+      - name: Upload v11 upgrader
+        uses: actions/upload-artifact@v4
+        with:
+          name: MuMuBot-v11-Upgrade
+          path: dist/MuMuBot_v11_Upgrade.exe
+          if-no-files-found: error
