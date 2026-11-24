@@ -163,6 +163,8 @@ def remove_telegram_button(text: str) -> str:
 def patch_gui(text: str) -> str:
     text = replace_remote_import(text, REMOTE_IMPORT_GUI)
     text = remove_telegram_button(text)
+    if "self.telegram_button =" in text:
+        raise RuntimeError("Не удалось убрать кнопку Telegram из GUI")
 
     if "start_remote_server()" not in text:
         lines = text.splitlines(True)
@@ -359,6 +361,23 @@ def cleanup_root(bot_dir: Path, backup: Path) -> list[str]:
                     shutil.copy2(path, dest)
                 path.unlink()
                 removed.append(path.name)
+            except Exception:
+                pass
+
+    # v10 хранила Telegram-токен в APPDATA. В v11 он больше не нужен.
+    for name in (
+        "telegram_settings.json",
+        "telegram_control_state.json",
+        "telegram_report_state.json",
+    ):
+        path = appdata_dir() / name
+        if path.exists():
+            try:
+                dest = backup / ("removed_appdata_" + path.name)
+                if not dest.exists():
+                    shutil.copy2(path, dest)
+                path.unlink()
+                removed.append("%APPDATA%/" + path.name)
             except Exception:
                 pass
 
