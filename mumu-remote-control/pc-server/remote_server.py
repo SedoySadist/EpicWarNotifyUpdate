@@ -29,6 +29,7 @@ RESOURCE_HISTORY_FILE = APP_DIR / "resource_history.jsonl"
 
 _SERVER = None
 _SERVER_THREAD = None
+_DISCOVERY_THREAD = None
 _PAIR_CODE = None
 _LOCK = threading.RLock()
 
@@ -390,6 +391,37 @@ def _local_ips():
     return result
 
 
+def _discovery_loop():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.bind(("", 8766))
+        while True:
+            try:
+                data, address = sock.recvfrom(4096)
+                if data.decode("utf-8", "ignore").strip() != "MUMU_REMOTE_DISCOVER_V1":
+                    continue
+                cfg = _settings()
+                payload = json.dumps({
+                    "name": "MuMu Bot",
+                    "port": int(cfg.get("port", 8765)),
+                    "pair_code": _PAIR_CODE or "",
+                    "tailscale_url": (
+                        f"http://{_tailscale_ipv4()}:{int(cfg.get('port', 8765))}"
+                        if _tailscale_ipv4() else ""
+                    ),
+                }, ensure_ascii=False).encode("utf-8")
+                sock.sendto(payload, address)
+            except Exception:
+                time.sleep(0.2)
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "MuMuRemote/0.2"
 
@@ -523,7 +555,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def start_remote_server():
-    global _SERVER, _SERVER_THREAD, _PAIR_CODE
+    global _SERVER, _SERVER_THREAD, _DISCOVERY_THREAD, _PAIR_CODE
     with _LOCK:
         if _SERVER_THREAD and _SERVER_THREAD.is_alive():
             return
@@ -532,6 +564,9 @@ def start_remote_server():
         _SERVER = ThreadingHTTPServer((str(cfg.get("host", "0.0.0.0")), int(cfg.get("port", 8765))), Handler)
         _SERVER_THREAD = threading.Thread(target=_SERVER.serve_forever, name="MuMuRemoteServer", daemon=True)
         _SERVER_THREAD.start()
+        if not _DISCOVERY_THREAD or not _DISCOVERY_THREAD.is_alive():
+            _DISCOVERY_THREAD = threading.Thread(target=_discovery_loop, name="MuMuRemoteDiscovery", daemon=True)
+            _DISCOVERY_THREAD.start()
 
         ips = _local_ips()
         tailscale_ip = _tailscale_ipv4()
