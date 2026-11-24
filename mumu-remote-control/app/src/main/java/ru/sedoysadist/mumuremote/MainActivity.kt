@@ -16,7 +16,10 @@ import android.widget.*
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.URL
 import java.util.concurrent.Executors
 
@@ -44,6 +47,9 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("mumu_remote", MODE_PRIVATE)
         buildUi()
+        if (token().isBlank()) {
+            handler.postDelayed({ discoverPc(false) }, 700)
+        }
         handler.postDelayed(::autoRefreshTick, 1200)
     }
 
@@ -80,8 +86,15 @@ class MainActivity : Activity() {
             setBackgroundColor(panel)
         }
 
+        val discoverButton = Button(this).apply {
+            text = "Найти ПК автоматически"
+            isAllCaps = false
+            setOnClickListener { discoverPc(true) }
+        }
+        connection.addView(discoverButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)))
+
         serverInput = EditText(this).apply {
-            hint = "http://192.168.1.10:8765"
+            hint = "Адрес вручную, если автопоиск не нашёл ПК"
             setHintTextColor(muted)
             setTextColor(textColor)
             setSingleLine(true)
@@ -153,19 +166,33 @@ class MainActivity : Activity() {
         val url = baseUrl()
         val code = pairInput.text.toString().trim()
         if (url.isBlank() || code.isBlank()) {
-            toast("Укажи адрес сервера и код сопряжения")
+            toast("Нажми «Найти ПК автоматически» или укажи адрес и код")
             return
         }
+        pairTo(url, code, true)
+    }
+
+    private fun pairTo(url: String, code: String, showErrors: Boolean) {
         setBusy(true)
         executor.execute {
             try {
-                val result = Api.postJson(url, "/api/v1/pair", JSONObject().put("code", code), null)
+                val result = Api.postJson(url.trimEnd('/'), "/api/v1/pair", JSONObject().put("code", code), null)
                 val token = result.optString("token")
                 if (token.isBlank()) error("Сервер не вернул токен")
-                prefs.edit().putString("server_url", url).putString("token", token).apply()
+                val tailscaleUrl = result.optString("tailscale_url", "").trimEnd('/')
+                prefs.edit()
+                    .putString("server_url", url.trimEnd('/'))
+                    .putString("tailscale_url", tailscaleUrl)
+                    .putString("token", token)
+                    .apply()
                 runOnUiThread {
+                    serverInput.setText(url.trimEnd('/'))
                     pairInput.setText("")
-                    statusText.text = "Сервер: сопряжение выполнено"
+                    statusText.text = if (tailscaleUrl.isNotBlank()) {
+                        "Подключено • удалённый доступ готов через Tailscale"
+                    } else {
+                        "Подключено • локальная сеть"
+                    }
                     statusText.setTextColor(ok)
                     setBusy(false)
                     refreshAccounts(true)
@@ -173,9 +200,52 @@ class MainActivity : Activity() {
             } catch (e: Exception) {
                 runOnUiThread {
                     setBusy(false)
-                    statusText.text = "Ошибка сопряжения: ${e.message}"
+                    if (showErrors) {
+                        statusText.text = "Не удалось подключиться: ${e.message}"
+                        statusText.setTextColor(warn)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun discoverPc(showErrors: Boolean) {
+        statusText.text = "Ищу MuMu Bot в сети…"
+        statusText.setTextColor(muted)
+        executor.execute {
+            var socket: DatagramSocket? = null
+            try {
+                socket = DatagramSocket().apply {
+                    broadcast = true
+                    soTimeout = 2200
+                }
+                val payload = "MUMU_REMOTE_DISCOVER_V1".toByteArray(Charsets.UTF_8)
+                val targets = listOf("255.255.255.255")
+                for (target in targets) {
+                    val packet = DatagramPacket(payload, payload.size, InetAddress.getByName(target), 8766)
+                    socket.send(packet)
+                }
+                val buf = ByteArray(4096)
+                val response = DatagramPacket(buf, buf.size)
+                socket.receive(response)
+                val json = JSONObject(String(response.data, 0, response.length, Charsets.UTF_8))
+                val port = json.optInt("port", 8765)
+                val url = json.optString("url").ifBlank { "http://${response.address.hostAddress}:$port" }
+                val code = json.optString("pair_code")
+                if (code.isBlank()) error("ПК найден, но код сопряжения не получен")
+                runOnUiThread {
+                    serverInput.setText(url)
+                    pairInput.setText(code)
+                    statusText.text = "ПК найден. Подключаюсь…"
+                    pairTo(url, code, showErrors)
+                }
+            } catch (e: Exception) {
+                if (showErrors) runOnUiThread {
+                    statusText.text = "ПК не найден автоматически. Проверь, что MuMu Bot запущен."
                     statusText.setTextColor(warn)
                 }
+            } finally {
+                try { socket?.close() } catch (_: Exception) {}
             }
         }
     }
@@ -190,7 +260,7 @@ class MainActivity : Activity() {
         prefs.edit().putString("server_url", url).apply()
         executor.execute {
             try {
-                val result = Api.getJson(url, "/api/v1/accounts", token)
+                val result = Api.getJsonAny(urls(), "/api/v1/accounts", token)
                 val accounts = result.optJSONArray("accounts") ?: JSONArray()
                 runOnUiThread {
                     statusText.text = "Сервер: подключён • аккаунтов: ${accounts.length()}"
@@ -228,6 +298,7 @@ class MainActivity : Activity() {
     private fun accountCard(a: JSONObject): View {
         val device = a.optString("device")
         val name = a.optString("name", device)
+        val online = a.optBoolean("online", true)
         val paused = a.optBoolean("paused", false)
         val pauseRemaining = a.optInt("pause_remaining_seconds", 0)
         val foreground = a.optString("foreground_app", "-")
@@ -251,8 +322,12 @@ class MainActivity : Activity() {
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         titleRow.addView(TextView(this).apply {
-            text = if (paused) "ПАУЗА ${formatSeconds(pauseRemaining)}" else "РАБОТАЕТ"
-            setTextColor(if (paused) warn else ok)
+            text = when {
+                paused -> "ПАУЗА ${formatSeconds(pauseRemaining)}"
+                online -> "ОНЛАЙН"
+                else -> "ОФЛАЙН"
+            }
+            setTextColor(if (paused) warn else if (online) ok else muted)
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         })
         card.addView(titleRow)
@@ -260,6 +335,7 @@ class MainActivity : Activity() {
         card.addView(TextView(this).apply {
             text = buildString {
                 append(device)
+                if (!online) append("\nMuMu сейчас выключен или ADB не подключён")
                 append("\nПриложение: ")
                 append(if (foreground.isBlank()) "-" else foreground)
                 if (activeTask.isNotBlank()) {
@@ -293,15 +369,15 @@ class MainActivity : Activity() {
         }
 
         val row1 = buttonRow()
-        row1.addView(actionButton("Пауза") { showPauseDialog(device, name) }, weight())
-        row1.addView(actionButton("Возобновить") { postAction(device, "resume", JSONObject()) }, weight())
-        row1.addView(actionButton("Скриншот") { screenshot(device, name) }, weight())
+        row1.addView(actionButton("Пауза", online) { showPauseDialog(device, name) }, weight())
+        row1.addView(actionButton("Возобновить", online) { postAction(device, "resume", JSONObject()) }, weight())
+        row1.addView(actionButton("Скриншот", online) { screenshot(device, name) }, weight())
         card.addView(row1)
 
         val row2 = buttonRow()
-        row2.addView(actionButton("Запустить игру") { postAction(device, "game/start", JSONObject()) }, weight())
-        row2.addView(actionButton("Закрыть игру") { postAction(device, "game/stop", JSONObject()) }, weight())
-        row2.addView(actionButton("История") { showHistory(device, name) }, weight())
+        row2.addView(actionButton("Запустить игру", online) { postAction(device, "game/start", JSONObject()) }, weight())
+        row2.addView(actionButton("Закрыть игру", online) { postAction(device, "game/stop", JSONObject()) }, weight())
+        row2.addView(actionButton("История", true) { showHistory(device, name) }, weight())
         card.addView(row2, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
 
         return card
@@ -339,7 +415,7 @@ class MainActivity : Activity() {
     private fun postAction(device: String, action: String, body: JSONObject) {
         executor.execute {
             try {
-                Api.postJson(baseUrl(), "/api/v1/accounts/${Api.enc(device)}/$action", body, token())
+                Api.postJsonAny(urls(), "/api/v1/accounts/${Api.enc(device)}/$action", body, token())
                 runOnUiThread {
                     toast("Готово")
                     handler.postDelayed({ refreshAccounts(false) }, 500)
@@ -354,7 +430,7 @@ class MainActivity : Activity() {
         toast("Делаю скриншот…")
         executor.execute {
             try {
-                val bytes = Api.getBytes(baseUrl(), "/api/v1/accounts/${Api.enc(device)}/screenshot", token())
+                val bytes = Api.getBytesAny(urls(), "/api/v1/accounts/${Api.enc(device)}/screenshot", token())
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: error("Не удалось открыть PNG")
                 runOnUiThread {
                     val image = ImageView(this).apply {
@@ -379,7 +455,7 @@ class MainActivity : Activity() {
     private fun showHistory(device: String, name: String) {
         executor.execute {
             try {
-                val json = Api.getJson(baseUrl(), "/api/v1/accounts/${Api.enc(device)}/history?limit=30", token())
+                val json = Api.getJsonAny(urls(), "/api/v1/accounts/${Api.enc(device)}/history?limit=30", token())
                 val arr = json.optJSONArray("history") ?: JSONArray()
                 val sb = StringBuilder()
                 for (i in 0 until arr.length()) {
@@ -408,16 +484,20 @@ class MainActivity : Activity() {
     }
 
     private fun baseUrl(): String = serverInput.text.toString().trim().trimEnd('/')
+    private fun remoteUrl(): String = (prefs.getString("tailscale_url", "") ?: "").trimEnd('/')
+    private fun urls(): List<String> = listOf(remoteUrl(), baseUrl()).filter { it.isNotBlank() }.distinct()
     private fun token(): String = prefs.getString("token", "") ?: ""
     private fun setBusy(busy: Boolean) { refreshButton.isEnabled = !busy }
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun buttonRow() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
     private fun weight() = LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(4) }
-    private fun actionButton(label: String, onClick: () -> Unit) = Button(this).apply {
+    private fun actionButton(label: String, enabled: Boolean = true, onClick: () -> Unit) = Button(this).apply {
         text = label
         textSize = 11f
         isAllCaps = false
+        isEnabled = enabled
+        alpha = if (enabled) 1f else 0.45f
         setOnClickListener { onClick() }
     }
 
@@ -430,7 +510,7 @@ class MainActivity : Activity() {
 }
 
 private object Api {
-    private const val TIMEOUT = 8000
+    private const val TIMEOUT = 3500
 
     fun enc(v: String): String = java.net.URLEncoder.encode(v, "UTF-8").replace("+", "%20")
 
@@ -442,6 +522,27 @@ private object Api {
 
     fun getBytes(base: String, path: String, token: String?): ByteArray =
         request(base, path, "GET", null, token)
+
+    fun getJsonAny(bases: List<String>, path: String, token: String?): JSONObject =
+        JSONObject(String(requestAny(bases, path, "GET", null, token), Charsets.UTF_8))
+
+    fun postJsonAny(bases: List<String>, path: String, body: JSONObject, token: String?): JSONObject =
+        JSONObject(String(requestAny(bases, path, "POST", body.toString().toByteArray(Charsets.UTF_8), token), Charsets.UTF_8))
+
+    fun getBytesAny(bases: List<String>, path: String, token: String?): ByteArray =
+        requestAny(bases, path, "GET", null, token)
+
+    private fun requestAny(bases: List<String>, path: String, method: String, payload: ByteArray?, token: String?): ByteArray {
+        var last: Exception? = null
+        for (base in bases) {
+            try {
+                return request(base, path, method, payload, token)
+            } catch (e: Exception) {
+                last = e
+            }
+        }
+        throw last ?: IllegalStateException("Нет адреса MuMu Bot")
+    }
 
     private fun request(base: String, path: String, method: String, payload: ByteArray?, token: String?): ByteArray {
         val conn = (URL(base + path).openConnection() as HttpURLConnection).apply {
