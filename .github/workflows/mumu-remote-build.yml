@@ -1,4 +1,4 @@
-# MuMu Remote APK builder
+# MuMu Remote APK + PC server builder
 name: Build MuMu Remote APK
 
 on:
@@ -26,6 +26,10 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
+      - name: Validate PC server
+        working-directory: mumu-remote-control/pc-server
+        run: python3 -m py_compile remote_server.py install_into_mumubot.py
+
       - name: Build debug APK
         working-directory: mumu-remote-control
         run: gradle :app:assembleDebug --stacktrace
@@ -35,4 +39,11 @@ jobs:
         with:
           name: MuMuRemote-debug
           path: mumu-remote-control/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload PC server installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: MuMuRemote-PC-server
+          path: mumu-remote-control/pc-server/*
           if-no-files-found: error
