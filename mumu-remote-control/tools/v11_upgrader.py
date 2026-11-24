@@ -415,7 +415,8 @@ def install(bot_dir: Path) -> tuple[Path, list[str]]:
     write_text_atomic(gui_py, new_gui)
     shutil.copy2(remote_src, bot_dir / "remote_server.py")
     try:
-        os.system(f'attrib +h "{bot_dir / "remote_server.py"}" >nul 2>nul')
+        remote_target = bot_dir / "remote_server.py"
+        os.system(f'attrib +h "{remote_target}" >nul 2>nul')
     except Exception:
         pass
 
