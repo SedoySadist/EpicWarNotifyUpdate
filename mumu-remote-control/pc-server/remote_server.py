@@ -444,7 +444,7 @@ def remote_pause_gate(device: str) -> bool:
         resume_requested = bool(entry.get("resume_requested"))
 
         manual_resume_only = bool(entry.get("manual_resume_only"))
-        if (paused_until > now and not resume_requested:
+        if paused_until > now and not resume_requested:
             if not entry.get("game_stopped"):
                 try:
                     _force_stop_game(device)
