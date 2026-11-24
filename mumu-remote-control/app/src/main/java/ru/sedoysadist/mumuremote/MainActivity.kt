@@ -300,6 +300,7 @@ class MainActivity : Activity() {
         val name = a.optString("name", device)
         val online = a.optBoolean("online", true)
         val paused = a.optBoolean("paused", false)
+        val manualHold = a.optBoolean("manual_resume_only", false)
         val pauseRemaining = a.optInt("pause_remaining_seconds", 0)
         val foreground = a.optString("foreground_app", "-")
         val activeTask = a.optString("active_task", "")
