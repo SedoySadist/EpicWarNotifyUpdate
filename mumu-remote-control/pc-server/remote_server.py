@@ -57,8 +57,125 @@ def _settings():
     data.setdefault("host", "0.0.0.0")
     data.setdefault("port", 8765)
     data.setdefault("adb_path", "")
+    data.setdefault("mumu_manager_path", "")
     _atomic_write_json(SETTINGS_FILE, data)
     return data
+
+
+def _find_mumu_manager():
+    configured = _settings().get("mumu_manager_path")
+    if configured and Path(str(configured)).exists():
+        return str(configured)
+
+    bases = [
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
+    ]
+    candidates = []
+    for base in bases:
+        candidates.extend([
+            base / "Netease" / "MuMuPlayer" / "nx_main" / "MuMuManager.exe",
+            base / "Netease" / "MuMuPlayer-12.0" / "nx_main" / "MuMuManager.exe",
+            base / "Netease" / "MuMuPlayerGlobal-12.0" / "nx_main" / "MuMuManager.exe",
+        ])
+        netease = base / "Netease"
+        try:
+            if netease.exists():
+                candidates.extend(netease.glob("MuMu*/nx_main/MuMuManager.exe"))
+        except Exception:
+            pass
+
+    for item in candidates:
+        try:
+            if item.exists():
+                return str(item)
+        except Exception:
+            pass
+    return ""
+
+
+def _manager_instances():
+    manager = _find_mumu_manager()
+    if not manager:
+        return None
+    try:
+        cp = subprocess.run(
+            [manager, "info", "-v", "all"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        raw = cp.stdout.decode("utf-8", "ignore").strip()
+        if cp.returncode != 0 or not raw:
+            return None
+        data = json.loads(raw)
+    except Exception:
+        return None
+
+    if isinstance(data, list):
+        records = data
+    elif isinstance(data, dict):
+        records = [data] if "index" in data else list(data.values())
+    else:
+        return None
+
+    found = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        try:
+            index = int(record.get("index"))
+        except Exception:
+            continue
+        started = bool(
+            record.get("is_android_started")
+            or record.get("is_process_started")
+            or record.get("player_state") == "start_finished"
+            or record.get("adb_port")
+        )
+        host = str(record.get("adb_host_ip") or "127.0.0.1")
+        port = record.get("adb_port")
+        try:
+            port = int(port) if port else None
+        except Exception:
+            port = None
+        if started and not port:
+            port = 16384 + 32 * index
+        serial = f"{host}:{port}" if port else ""
+        found.append({
+            "id": f"mumu:{index}",
+            "vm_index": index,
+            "name": str(record.get("name") or f"MuMu {index + 1}"),
+            "started": started,
+            "serial": serial,
+        })
+    return sorted(found, key=lambda x: x["vm_index"])
+
+
+def _manager_control(index, action):
+    manager = _find_mumu_manager()
+    if not manager:
+        raise RuntimeError("MuMuManager.exe не найден")
+    cp = subprocess.run(
+        [manager, "control", "-v", str(int(index)), str(action)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=120,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    raw = cp.stdout.decode("utf-8", "ignore").strip()
+    reply = {}
+    try:
+        reply = json.loads(raw) if raw else {}
+    except Exception:
+        reply = {}
+    if cp.returncode != 0 or (isinstance(reply, dict) and reply.get("errcode") not in (None, 0)):
+        msg = reply.get("errmsg") if isinstance(reply, dict) else ""
+        raise RuntimeError(msg or cp.stderr.decode("utf-8", "ignore").strip() or "MuMuManager command failed")
+    return True
 
 
 def _find_adb():
@@ -158,6 +275,65 @@ def _known_devices():
         except Exception:
             return (1, str(device))
     return sorted((d for d in found if _looks_like_device(d)), key=sort_key)
+
+
+def _account_records():
+    connected = _connected_devices()
+    names = _gui_name_map()
+    manager_records = _manager_instances()
+    result = []
+    covered = set()
+
+    if manager_records is not None:
+        for rec in manager_records:
+            serial = rec.get("serial") or ""
+            if serial:
+                covered.add(serial)
+            display_name = names.get(serial) or rec.get("name") or f"Аккаунт {len(result) + 1}"
+            result.append({
+                "id": rec["id"],
+                "device": serial,
+                "vm_index": rec["vm_index"],
+                "name": display_name,
+                "mumu_running": bool(rec.get("started")),
+                "online": bool(serial and serial in connected),
+            })
+
+    for device in _known_devices():
+        if device in covered:
+            continue
+        result.append({
+            "id": device,
+            "device": device,
+            "vm_index": None,
+            "name": names.get(device) or f"Аккаунт {len(result) + 1}",
+            "mumu_running": device in connected,
+            "online": device in connected,
+        })
+    return result
+
+
+def _resolve_account(account_id):
+    account_id = str(account_id or "")
+    if account_id.startswith("mumu:"):
+        try:
+            index = int(account_id.split(":", 1)[1])
+        except Exception:
+            raise RuntimeError("Неверный индекс MuMu")
+        records = _manager_instances() or []
+        for rec in records:
+            if rec.get("vm_index") == index:
+                return rec
+        raise RuntimeError("Экземпляр MuMu не найден")
+    return {"id": account_id, "vm_index": None, "serial": account_id, "started": True, "name": account_id}
+
+
+def _resolve_device(account_id):
+    rec = _resolve_account(account_id)
+    serial = str(rec.get("serial") or "")
+    if not serial:
+        raise RuntimeError("MuMu сейчас выключен или ADB ещё не готов")
+    return serial
 
 
 def _gui_name_map():
@@ -323,26 +499,40 @@ def _active_task(device):
     return best
 
 
-def _account_payload(device, index, connected=None):
+def _account_payload(record, index, connected=None):
     connected = connected if isinstance(connected, set) else _connected_devices()
-    online = device in connected
-    runtime = _runtime_device(device)
-    pause = _entry(device)
+    account_id = str(record.get("id") or "")
+    device = str(record.get("device") or "")
+    online = bool(record.get("online")) and bool(device in connected)
+    mumu_running = bool(record.get("mumu_running"))
+    runtime = _runtime_device(device) if device else {}
+    pause = _entry(device) if device else None
     paused_until = float(pause.get("paused_until") or 0) if isinstance(pause, dict) else 0
     remaining = max(0, int(paused_until - time.time()))
-    names = _gui_name_map()
     manual_hold = bool(pause.get("manual_resume_only")) if isinstance(pause, dict) else False
-    status = "phone_hold" if manual_hold else ("paused" if remaining > 0 else ("online" if online else "offline"))
+    if manual_hold:
+        status = "phone_hold"
+    elif remaining > 0:
+        status = "paused"
+    elif online:
+        status = "online"
+    elif mumu_running:
+        status = "starting"
+    else:
+        status = "offline"
     return {
+        "id": account_id or device,
         "device": device,
-        "name": names.get(device) or f"Аккаунт {index + 1}",
+        "vm_index": record.get("vm_index"),
+        "name": str(record.get("name") or f"Аккаунт {index + 1}"),
         "online": online,
+        "mumu_running": mumu_running,
         "status": status,
         "paused": remaining > 0 or manual_hold,
         "manual_resume_only": manual_hold,
         "pause_reason": pause.get("reason") if isinstance(pause, dict) else "",
         "pause_remaining_seconds": remaining,
-        "active_task": _active_task(device) if online else "",
+        "active_task": _active_task(device) if online and device else "",
         "foreground_app": runtime.get("foreground_app") if online and isinstance(runtime, dict) else None,
         "resources": {
             "battle_power_text": runtime.get("battle_power_text"),
@@ -504,15 +694,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/v1/accounts":
             connected = _connected_devices()
-            devs = _known_devices()
-            self._json({"accounts": [_account_payload(d, i, connected) for i, d in enumerate(devs)], "updated_at": time.time()})
+            records = _account_records()
+            self._json({"accounts": [_account_payload(rec, i, connected) for i, rec in enumerate(records)], "updated_at": time.time()})
             return
 
         if len(parts) >= 5 and parts[:3] == ["api", "v1", "accounts"]:
-            device = parts[3]
+            account_id = parts[3]
             action = parts[4]
             if action == "screenshot":
                 try:
+                    device = _resolve_device(account_id)
                     raw = _adb("-s", device, "exec-out", "screencap", "-p", timeout=20, binary=True)
                     self.send_response(200)
                     self.send_header("Content-Type", "image/png")
@@ -526,7 +717,12 @@ class Handler(BaseHTTPRequestHandler):
             if action == "history":
                 q = urllib.parse.parse_qs(parsed.query)
                 limit = int((q.get("limit") or ["30"])[0])
-                self._json({"history": _history(device, limit)})
+                try:
+                    device = _resolve_device(account_id)
+                    rows = _history(device, limit)
+                except Exception:
+                    rows = []
+                self._json({"history": rows})
                 return
 
         self._json({"error": "Неизвестный endpoint"}, 404)
@@ -555,9 +751,25 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if len(parts) >= 5 and parts[:3] == ["api", "v1", "accounts"]:
-            device = parts[3]
+            account_id = parts[3]
             action = "/".join(parts[4:])
             try:
+                if action == "emulator/start":
+                    rec = _resolve_account(account_id)
+                    if rec.get("vm_index") is None:
+                        raise RuntimeError("Для этого аккаунта неизвестен индекс MuMu")
+                    _manager_control(rec["vm_index"], "launch")
+                    self._json({"ok": True})
+                    return
+                if action == "emulator/stop":
+                    rec = _resolve_account(account_id)
+                    if rec.get("vm_index") is None:
+                        raise RuntimeError("Для этого аккаунта неизвестен индекс MuMu")
+                    _manager_control(rec["vm_index"], "shutdown")
+                    self._json({"ok": True})
+                    return
+
+                device = _resolve_device(account_id)
                 if action == "pause":
                     minutes = int(body.get("minutes", 30))
                     minutes = _set_pause(device, minutes)
